@@ -126,7 +126,7 @@ class StreamDecoder:
             if c in map(ord, {"d", "l", "e"}):
                 self.stream.advance_one()
                 yield Special(c)
-            elif c == "i":
+            elif c == ord("i"):
                 self.stream.advance_one()
                 s = self.stream.read_until(b"e")
                 yield int(s)

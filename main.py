@@ -9,7 +9,8 @@ import functools
 import sortedcontainers
 import secrets
 import struct
-import socket
+from trio import socket
+import sys
 from dataclasses import dataclass, field
 from typing import Union, Tuple
 
@@ -46,10 +47,14 @@ class NodeInfo:
     addr: Tuple[str, int]
 
 
+Addr = Tuple[str, int]
+
+
 class Bootstrap:
     active: Dict[bytes, None] = {}
     alpha: int = 3
     target: PeerId
+    queried: Set[Addr] = set()
 
     def __init__(self, socket, target: PeerId, nursery):
         self.socket = socket
@@ -75,13 +80,17 @@ class Bootstrap:
         if key not in (active := self.active):
             logging.warning("got unexpected reply: %r", key)
             return
-        del active[key]
-        logging.debug("got reply from %s at %s", msg[b"r"][b"id"].hex(), src)
-        for (id, packed_ip, port) in struct.iter_unpack("20s4sH", msg[b"r"][b"nodes"]):
-            self.backlog.add(NodeInfo(PeerId(id), (socket.inet_ntoa(packed_ip), port),))
-        self.try_do_sends()
+        self.nursery.start_soon(active[key].send, msg)
+        try:
+            replier_id = msg[b"r"][b"id"]
+        except KeyError:
+            logging.warning(
+                "got reply from %r with no replier id:\n%s", src, pformat(msg)
+            )
+        else:
+            logging.debug("got reply from %s at %s", replier_id.hex(), src)
 
-    def start_query(self, addr, q, a=None, callback=None):
+    def start_query(self, addr, q, a=None):
         if a is None:
             a = {}
         a["id"] = self.target
@@ -89,15 +98,52 @@ class Bootstrap:
         msg = {"t": tid, "y": "q", "q": q, "a": a}
         key = tid
         if key in self.active:
-            raise ValueError(key)
-        self.active[key] = callback
-        self.nursery.start_soon(self.socket.sendto, b"".join(bencode.encode(msg)), addr)
+            raise "key already in use"
+        send_channel, receive_channel = trio.open_memory_channel(0)
+        self.active[key] = send_channel
+        self.queried.add(addr)
+        self.nursery.start_soon(
+            self.do_query, b"".join(bencode.encode(msg)), addr, receive_channel, key
+        )
+
+    def process_reply_nodes(self, nodes):
+        for id, packed_ip, port in struct.iter_unpack("!20s4sH", nodes):
+            self.backlog.add(NodeInfo(PeerId(id), (socket.inet_ntoa(packed_ip), port),))
+        self.try_do_sends()
+
+    async def do_query(self, bytes, addr, response_receiver, key):
+        try:
+            async with response_receiver:
+                try:
+                    await self.socket.sendto(bytes, addr)
+                except socket.gaierror:
+                    logging.warning("error sending to %r: %s", addr, sys.exc_info()[1])
+                else:
+                    with trio.move_on_after(5):
+                        reply = await response_receiver.receive()
+                        try:
+                            nodes = reply[b"r"][b"nodes"]
+                        except KeyError:
+                            pass
+                        else:
+                            self.process_reply_nodes(nodes)
+                        if b"e" in reply:
+                            logging.error(
+                                "got error from %s: %s\nwe sent: %r", addr, reply, bytes
+                            )
+        finally:
+            del self.active[key]
+            self.try_do_sends()
 
     def find_node(self, addr):
-        return self.start_query(addr, "find_node")
+        return self.start_query(addr, "find_node", a={"target": self.target})
 
     def start_next(self):
         node_info = self.backlog.pop()
+        addr = node_info.addr
+        if addr in self.queried:
+            logging.warning("skipping already queried addr %r", addr)
+            return
         logging.debug("doing find_node on %s", node_info)
         return self.find_node(node_info.addr)
 
@@ -117,16 +163,18 @@ class Sender:
     db_conn: typing.Any
 
     async def sendto(self, bytes, addr):
-        with self.db_conn:
-            record_operation(self.db_conn, "send", addr_for_db(addr), bytes)
         try:
             await self.socket.sendto(
                 bytes, addr,
             )
-        except trio.socket.gaierror as exc:
-            logging.warning(f"sending to {addr}: {exc}")
-        except Exception:
-            logging.exception(f"sending to {addr}")
+        finally:
+            exc_value = sys.exc_info()[1]
+            if exc_value is not None:
+                exc_value = str(exc_value)
+            with self.db_conn:
+                record_operation(
+                    self.db_conn, "send", addr_for_db(addr), bytes, exc_value
+                )
 
 
 async def ping_bootstrap_nodes(sender, db_conn):
@@ -145,17 +193,20 @@ def new_message_id(db_conn: sqlite3.Connection) -> int:
     return cursor.lastrowid
 
 
-def record_operation(db_conn, type: str, remote_addr: str, bytes: bytes):
+def record_operation(
+    db_conn, type: str, remote_addr: str, bytes: bytes, error: Union[str, None]
+):
     with db_conn:
         message_id = new_message_id(db_conn)
         db_conn.execute(
-            "insert into operations (message_id, remote_addr, type) values (?, ?, ?)",
-            [message_id, remote_addr, type],
+            "insert into operations (message_id, remote_addr, type, error) values (?, ?, ?, ?)",
+            [message_id, remote_addr, type, error],
         )
         record_packet(bytes, db_conn, message_id)
 
 
 def record_packet(bytes, db_conn, top_id):
+    logging.debug("recording packet %r", bytes)
     bencode.StreamDecoder(bencode.BytesStreamReader(bytes)).visit(
         MessageWriter(db_conn.cursor(), top_id)
     )
@@ -227,12 +278,13 @@ class MessageWriter:
 async def receiver(socket, db_conn):
     while True:
         bytes, addr = await socket.recvfrom(0x1000)
-        record_operation(db_conn, "recv", addr_for_db(addr), bytes)
+        record_operation(db_conn, "recv", addr_for_db(addr), bytes, None)
         yield bytes, addr
 
 
 async def main():
-    logging.basicConfig(level=logging.DEBUG)
+    logging.Formatter.default_msec_format = "%s.%03d"
+    logging.basicConfig(level=logging.INFO, style="{", format="{asctime} {message}")
     db_conn = sqlite3.connect("herp.db")
     socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
     await socket.bind(("", 42069))
