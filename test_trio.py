@@ -13,7 +13,8 @@ async def starts_child_when_cancelled(nursery):
     try:
         await trio.sleep_forever()
     finally:
-        assert sys.exc_info()[0] == trio.Cancelled
+        # trio.Cancelled can't be made as a value manually, so check the type.
+        assert sys.exc_info()[0] is trio.Cancelled
         nursery.start_soon(child)
 
 
