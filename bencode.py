@@ -8,6 +8,10 @@ Dict = typing.Dict[bytes, Any]
 Object = Union[Dict, int, bytes, list]
 
 
+def encode_to_bytes(value: Any) -> bytes:
+    return b"".join(encode(value))
+
+
 def encode(value):
     return {
         dict: encode_dict,

@@ -13,6 +13,7 @@ from trio import socket
 import sys
 from dataclasses import dataclass, field
 from typing import Union, Tuple
+import argparse
 
 global_bootstrap_nodes = [
     ("router.utorrent.com", 6881),
@@ -22,6 +23,8 @@ global_bootstrap_nodes = [
     ("router.silotis.us", 6881),  # IPv6
     ("dht.libtorrent.org", 25401),  # @arvidn's
 ]
+
+logger = logging.root
 
 
 def addr_for_db(addr: Tuple[str, int]) -> str:
@@ -172,9 +175,13 @@ class Sender:
             if exc_value is not None:
                 exc_value = str(exc_value)
             with self.db_conn:
-                record_operation(
-                    self.db_conn, "send", addr_for_db(addr), bytes, exc_value
-                )
+                try:
+                    record_operation(
+                        self.db_conn, "send", addr_for_db(addr), bytes, exc_value
+                    )
+                except ValueError:
+                    breakpoint()
+                    raise
 
 
 async def ping_bootstrap_nodes(sender, db_conn):
@@ -282,19 +289,73 @@ async def receiver(socket, db_conn):
         yield bytes, addr
 
 
-async def main():
-    logging.Formatter.default_msec_format = "%s.%03d"
-    logging.basicConfig(level=logging.INFO, style="{", format="{asctime} {message}")
-    db_conn = sqlite3.connect("herp.db")
-    socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
-    await socket.bind(("", 42069))
+def string_to_address_tuple(s):
+    host, port = s.rsplit(":")
+    return host, int(port)
+
+
+async def sample_infohashes_for_db(args, db_conn, socket):
+    queries: Dict[bytes, Any] = {}
+    sender = Sender(socket, db_conn)
+
+    async def handle_received():
+        async for bytes, addr in receiver(socket, db_conn):
+            print(f"received from {addr}: {bytes}")
+
+    async def sample_infohashes():
+        for (addr,) in db_conn.execute(
+            "select distinct remote_addr from operations where type='recv'"
+        ):
+            t = secrets.token_bytes(8)
+            try:
+                await sender.sendto(
+                    bencode.encode_to_bytes(
+                        {
+                            "t": t,
+                            "a": {
+                                "id": secrets.token_bytes(20),
+                                "target": secrets.token_bytes(20),
+                            },
+                            "y": "q",
+                            "q": "sample_infohashes",
+                        }
+                    ),
+                    string_to_address_tuple(addr),
+                )
+            except trio.socket.gaierror as exc:
+                logger.warning("sending to %s: %s", addr, exc)
+            else:
+                print(f"messaged {addr}")
+            await trio.sleep(0.1)
+
+    async with trio.open_nursery() as nursery:
+        nursery.start_soon(sample_infohashes)
+        await handle_received()
+
+
+async def bootstrap(sender):
+    sender = Sender(socket, db_conn)
     async with trio.open_nursery() as nursery:
         target_id = secrets.token_bytes(20)
         logging.info("bootstrap target id: %s", target_id.hex())
-        bootstrap = Bootstrap(Sender(socket, db_conn), target_id, nursery=nursery)
+        bootstrap = Bootstrap(sender, target_id, nursery=nursery)
         bootstrap.add_candidates(*global_bootstrap_nodes)
         async for bytes, addr in receiver(socket, db_conn):
             bootstrap.on_reply(bytes, addr)
+
+
+async def main():
+    logging.Formatter.default_msec_format = "%s.%03d"
+    logging.basicConfig(level=logging.INFO, style="{", format="{asctime} {message}")
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(required=True, dest='cmd')
+    sample_infohashes_parser = subparsers.add_parser("sample_infohashes")
+    sample_infohashes_parser.set_defaults(func=sample_infohashes_for_db)
+    args = parser.parse_args()
+    db_conn = sqlite3.connect("herp.db")
+    socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
+    await socket.bind(("", 42069))
+    await args.func(args, db_conn, socket)
 
 
 trio.run(main)
