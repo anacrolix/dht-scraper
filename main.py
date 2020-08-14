@@ -138,7 +138,7 @@ class Bootstrap:
                             )
         finally:
             del self.active[key]
-            self.try_do_sends()
+        self.try_do_sends()
 
     def find_node(self, addr):
         return self.start_query(addr, "find_node", a={"target": self.target})
