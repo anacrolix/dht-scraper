@@ -54,7 +54,7 @@ Addr = Tuple[str, int]
 
 
 class Bootstrap:
-    active: Dict[bytes, None] = {}
+    active: Dict[bytes, trio.MemorySendChannel] = {}
     alpha: int = 3
     target: PeerId
     queried: Set[Addr] = set()
@@ -101,7 +101,7 @@ class Bootstrap:
         msg = {"t": tid, "y": "q", "q": q, "a": a}
         key = tid
         if key in self.active:
-            raise "key already in use"
+            raise KeyError("already in use")
         send_channel, receive_channel = trio.open_memory_channel(0)
         self.active[key] = send_channel
         self.queried.add(addr)

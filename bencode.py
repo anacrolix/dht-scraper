@@ -32,7 +32,7 @@ def encode_dict(value):
 
 def encode_list(value):
     yield b"l"
-    for item in list:
+    for item in value:
         yield from encode(item)
     yield b"e"
 
@@ -99,7 +99,7 @@ class StreamReader(Protocol):
 
 @dataclass
 class BytesStreamReader:
-    bytes: bytes
+    bytes: typing.ByteString
 
     def peek_one(self) -> Optional[int]:
         if len(self.bytes) == 0:
