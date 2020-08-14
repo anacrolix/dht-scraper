@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Union, Tuple
 import argparse
+import os
 
 global_bootstrap_nodes = [
     ("router.utorrent.com", 6881),
@@ -78,7 +79,7 @@ class Bootstrap:
 
     def on_reply(self, reply, src):
         msg: bencode.Dict = bencode.parse_one_from_bytes(reply)
-        logging.debug("got reply:\n%s", pformat(msg))
+        # logging.debug("got reply:\n%s", pformat(msg))
         key = msg[b"t"]
         if key not in (active := self.active):
             logging.warning("got unexpected reply: %r", key)
@@ -91,7 +92,8 @@ class Bootstrap:
                 "got reply from %r with no replier id:\n%s", src, pformat(msg)
             )
         else:
-            logging.debug("got reply from %s at %s", replier_id.hex(), src)
+            pass
+            # logging.debug("got reply from %s at %s", replier_id.hex(), src)
 
     def start_query(self, addr, q, a=None):
         if a is None:
@@ -143,11 +145,12 @@ class Bootstrap:
 
     def start_next(self):
         node_info = self.backlog.pop()
+        logger.debug(
+            "picked %r for next query", node_info)
         addr = node_info.addr
         if addr in self.queried:
             logging.warning("skipping already queried addr %r", addr)
             return
-        logging.debug("doing find_node on %s", node_info)
         return self.find_node(node_info.addr)
 
     def try_do_sends(self):
@@ -213,7 +216,7 @@ def record_operation(
 
 
 def record_packet(bytes, db_conn, top_id):
-    logging.debug("recording packet %r", bytes)
+    # logging.debug("recording packet %r", bytes)
     bencode.StreamDecoder(bencode.BytesStreamReader(bytes)).visit(
         MessageWriter(db_conn.cursor(), top_id)
     )
@@ -346,7 +349,11 @@ async def bootstrap(args, db_conn, socket):
 
 async def main():
     logging.Formatter.default_msec_format = "%s.%03d"
-    logging.basicConfig(level=logging.INFO, style="{", format="{asctime} {message}")
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOGLEVEL", "INFO")),
+        style="{",
+        format="{module}:{lineno} {message}",
+    )
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(required=True, dest="cmd")
     sample_infohashes_parser = subparsers.add_parser("sample_infohashes")
