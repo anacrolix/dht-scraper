@@ -333,7 +333,7 @@ async def sample_infohashes_for_db(args, db_conn, socket):
         await handle_received()
 
 
-async def bootstrap(sender):
+async def bootstrap(args, db_conn, socket):
     sender = Sender(socket, db_conn)
     async with trio.open_nursery() as nursery:
         target_id = secrets.token_bytes(20)
@@ -348,9 +348,11 @@ async def main():
     logging.Formatter.default_msec_format = "%s.%03d"
     logging.basicConfig(level=logging.INFO, style="{", format="{asctime} {message}")
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(required=True, dest='cmd')
+    subparsers = parser.add_subparsers(required=True, dest="cmd")
     sample_infohashes_parser = subparsers.add_parser("sample_infohashes")
     sample_infohashes_parser.set_defaults(func=sample_infohashes_for_db)
+    bootstrap_parser = subparsers.add_parser("bootstrap")
+    bootstrap_parser.set_defaults(func=bootstrap)
     args = parser.parse_args()
     db_conn = sqlite3.connect("herp.db")
     socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
