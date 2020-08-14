@@ -44,6 +44,9 @@ class PeerId:
     def __repr__(self):
         return self.bytes.hex()
 
+    def __xor__(self, other):
+        int.from_bytes(other, "big") ^ int.from_bytes(self, "big")
+
 
 @dataclass(unsafe_hash=True, order=True)
 class NodeInfo:
@@ -63,9 +66,25 @@ class Bootstrap:
     def __init__(self, socket, target: PeerId, nursery):
         self.socket = socket
         self.target = target
-        self.backlog: Set[NodeInfo] = sortedcontainers.SortedSet()
+        # this is sorted so that the best candidates are at the end, since pop defaults to popping from the back
+        self.backlog: Set[NodeInfo] = sortedcontainers.SortedSet(key=self.backlog_key)
         self.exhausted = trio.Event()
         self.nursery = nursery
+
+    def backlog_key(self, elem: NodeInfo) -> bool:
+        # TODO: There's a BEP for hashing addrs
+        addr = elem.addr
+        if elem.id is None:
+            return False, addr
+        else:
+            return (
+                True,
+                -(
+                    int.from_bytes(self.target, "big")
+                    ^ int.from_bytes(elem.id.bytes, "big")
+                ),
+                addr,
+            )
 
     def new_transaction_id(self) -> bytes:
         return secrets.token_bytes(8)
@@ -145,8 +164,7 @@ class Bootstrap:
 
     def start_next(self):
         node_info = self.backlog.pop()
-        logger.debug(
-            "picked %r for next query", node_info)
+        logger.debug("picked %r for next query", node_info)
         addr = node_info.addr
         if addr in self.queried:
             logging.warning("skipping already queried addr %r", addr)
@@ -367,4 +385,5 @@ async def main():
     await args.func(args, db_conn, socket)
 
 
-trio.run(main)
+if __name__ == "__main__":
+    trio.run(main)
