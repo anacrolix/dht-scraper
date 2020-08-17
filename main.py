@@ -6,7 +6,7 @@ import sqlite3
 import logging
 import typing
 import functools
-import sortedcontainers
+from sortedcontainers import SortedSet
 import secrets
 import struct
 from trio import socket
@@ -34,7 +34,8 @@ def addr_for_db(addr: Tuple[str, int]) -> str:
 
 @dataclass(unsafe_hash=True)
 class PeerId:
-    bytes: typing.ByteString  # bytes is overloaded in this scope
+    BytesType = bytes  # bytes is overloaded in this scope
+    bytes: BytesType
 
     def __lt__(self, other):
         if other is None:
@@ -64,22 +65,21 @@ TransactionId = NewType("TransactionId", bytes)
 class Bootstrap:
     active: Dict[TransactionId, trio.MemorySendChannel] = {}
     alpha: int = 3
-    target: typing.ByteString
     queried: Set[Addr] = set()
 
     def __init__(self, socket, target: typing.ByteString, nursery):
         self.socket = socket
         self.target = target
         # this is sorted so that the best candidates are at the end, since pop defaults to popping from the back
-        self.backlog: Set[NodeInfo] = sortedcontainers.SortedSet(key=self.backlog_key)
+        self.backlog: SortedSet[NodeInfo] = SortedSet(key=self._distance_key)
         self.exhausted = trio.Event()
         self.nursery = nursery
+        self.responded: SortedSet[NodeInfo] = SortedSet(key=self._distance_key)
 
-    def backlog_key(
+    def _distance_key(
         self, elem: NodeInfo
-    ) -> Union[Tuple[Literal[False], Addr], Tuple[Literal[True], int, Addr]]:
-        # TODO: There's a BEP for hashing addrs
-        addr = elem.addr
+    ) -> Union[Tuple[Literal[False], int], Tuple[Literal[True], int, int]]:
+        addr = hash(elem.addr)
         if elem.id is None:
             return False, addr
         else:
@@ -91,9 +91,6 @@ class Bootstrap:
 
     def new_transaction_id(self) -> TransactionId:
         return TransactionId(secrets.token_bytes(8))
-
-    def add_candidate(self, addr):
-        self.backlog.add(addr)
 
     def add_candidates(self, *addrs):
         self.backlog.update([NodeInfo(None, addr) for addr in addrs])
@@ -138,7 +135,7 @@ class Bootstrap:
             self.backlog.add(NodeInfo(PeerId(id), (socket.inet_ntoa(packed_ip), port),))
         self.try_do_sends()
 
-    async def do_query(self, bytes, addr, response_receiver, key):
+    async def do_query(self, bytes, addr: Addr, response_receiver, key: TransactionId):
         try:
             async with response_receiver:
                 try:
@@ -147,13 +144,16 @@ class Bootstrap:
                     logging.warning("error sending to %r: %s", addr, sys.exc_info()[1])
                 else:
                     with trio.move_on_after(5):
-                        reply = await response_receiver.receive()
-                        try:
-                            nodes = reply[b"r"][b"nodes"]
-                        except KeyError:
-                            pass
-                        else:
-                            self.process_reply_nodes(nodes)
+                        reply: bencode.Dict = await response_receiver.receive()
+                        if b"r" in reply:
+                            reply_id: bytes = reply[b"r"][b"id"]
+                            self.responded.add(NodeInfo(PeerId(reply_id), addr))
+                            try:
+                                nodes = reply[b"r"][b"nodes"]
+                            except KeyError:
+                                pass
+                            else:
+                                self.process_reply_nodes(nodes)
                         if b"e" in reply:
                             logging.error(
                                 "got error from %s: %s\nwe sent: %r", addr, reply, bytes
@@ -167,6 +167,14 @@ class Bootstrap:
 
     def start_next(self):
         node_info = self.backlog.pop()
+        if len(self.responded) >= 8:
+            if self._distance_key(node_info) <= self._distance_key(self.responded[-8]):
+                logging.debug("discarding divergent candidate %r", node_info)
+                return
+        addr = node_info.addr
+        if addr in self.queried:
+            logging.warning("skipping already queried addr %r", addr)
+            return
         logger.debug(
             "picked %r for next query (distance=%s)",
             node_info,
@@ -174,10 +182,6 @@ class Bootstrap:
             if node_info.id is None
             else distance(self.target, node_info.id.bytes).to_bytes(20, "big").hex(),
         )
-        addr = node_info.addr
-        if addr in self.queried:
-            logging.warning("skipping already queried addr %r", addr)
-            return
         return self.find_node(node_info.addr)
 
     def try_do_sends(self):
