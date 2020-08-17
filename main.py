@@ -57,6 +57,10 @@ class NodeInfo:
 Addr = Tuple[str, int]
 
 
+def distance(a, b: bytes) -> int:
+    return int.from_bytes(a, "big") ^ int.from_bytes(b, "big")
+
+
 class Bootstrap:
     active: Dict[bytes, trio.MemorySendChannel] = {}
     alpha: int = 3
@@ -79,10 +83,7 @@ class Bootstrap:
         else:
             return (
                 True,
-                -(
-                    int.from_bytes(self.target, "big")
-                    ^ int.from_bytes(elem.id.bytes, "big")
-                ),
+                -(distance(self.target, elem.id.bytes)),
                 addr,
             )
 
@@ -164,7 +165,11 @@ class Bootstrap:
 
     def start_next(self):
         node_info = self.backlog.pop()
-        logger.debug("picked %r for next query", node_info)
+        logger.debug(
+            "picked %r for next query (distance=%s)",
+            node_info,
+            None if node_info.id is None else distance(self.target, node_info.id.bytes).to_bytes(20, 'big').hex(),
+        )
         addr = node_info.addr
         if addr in self.queried:
             logging.warning("skipping already queried addr %r", addr)
