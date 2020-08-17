@@ -34,7 +34,7 @@ def addr_for_db(addr: Tuple[str, int]) -> str:
 
 @dataclass(unsafe_hash=True)
 class PeerId:
-    bytes: bytes
+    bytes: typing.ByteString  # bytes is overloaded in this scope
 
     def __lt__(self, other):
         if other is None:
@@ -44,30 +44,30 @@ class PeerId:
     def __repr__(self):
         return self.bytes.hex()
 
-    def __xor__(self, other):
-        int.from_bytes(other, "big") ^ int.from_bytes(self, "big")
-
-
-@dataclass(unsafe_hash=True, order=True)
-class NodeInfo:
-    id: PeerId
-    addr: Tuple[str, int]
-
 
 Addr = Tuple[str, int]
 
 
-def distance(a, b: bytes) -> int:
+@dataclass(unsafe_hash=True, order=True)
+class NodeInfo:
+    id: Optional[PeerId]
+    addr: Addr
+
+
+def distance(a, b: typing.ByteString) -> int:
     return int.from_bytes(a, "big") ^ int.from_bytes(b, "big")
 
 
+TransactionId = NewType("TransactionId", bytes)
+
+
 class Bootstrap:
-    active: Dict[bytes, trio.MemorySendChannel] = {}
+    active: Dict[TransactionId, trio.MemorySendChannel] = {}
     alpha: int = 3
-    target: PeerId
+    target: typing.ByteString
     queried: Set[Addr] = set()
 
-    def __init__(self, socket, target: PeerId, nursery):
+    def __init__(self, socket, target: typing.ByteString, nursery):
         self.socket = socket
         self.target = target
         # this is sorted so that the best candidates are at the end, since pop defaults to popping from the back
@@ -75,7 +75,9 @@ class Bootstrap:
         self.exhausted = trio.Event()
         self.nursery = nursery
 
-    def backlog_key(self, elem: NodeInfo) -> bool:
+    def backlog_key(
+        self, elem: NodeInfo
+    ) -> Union[Tuple[Literal[False], Addr], Tuple[Literal[True], int, Addr]]:
         # TODO: There's a BEP for hashing addrs
         addr = elem.addr
         if elem.id is None:
@@ -87,8 +89,8 @@ class Bootstrap:
                 addr,
             )
 
-    def new_transaction_id(self) -> bytes:
-        return secrets.token_bytes(8)
+    def new_transaction_id(self) -> TransactionId:
+        return TransactionId(secrets.token_bytes(8))
 
     def add_candidate(self, addr):
         self.backlog.add(addr)
@@ -98,7 +100,7 @@ class Bootstrap:
         self.try_do_sends()
 
     def on_reply(self, reply, src):
-        msg: bencode.Dict = bencode.parse_one_from_bytes(reply)
+        msg = typing.cast(bencode.Dict, bencode.parse_one_from_bytes(reply))
         # logging.debug("got reply:\n%s", pformat(msg))
         key = msg[b"t"]
         if key not in (active := self.active):
@@ -124,7 +126,7 @@ class Bootstrap:
         key = tid
         if key in self.active:
             raise KeyError("already in use")
-        send_channel, receive_channel = trio.open_memory_channel(0)
+        send_channel, receive_channel = trio.open_memory_channel[bencode.Dict](0)
         self.active[key] = send_channel
         self.queried.add(addr)
         self.nursery.start_soon(
@@ -168,7 +170,9 @@ class Bootstrap:
         logger.debug(
             "picked %r for next query (distance=%s)",
             node_info,
-            None if node_info.id is None else distance(self.target, node_info.id.bytes).to_bytes(20, 'big').hex(),
+            None
+            if node_info.id is None
+            else distance(self.target, node_info.id.bytes).to_bytes(20, "big").hex(),
         )
         addr = node_info.addr
         if addr in self.queried:
