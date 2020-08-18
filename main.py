@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Union, Tuple
 import argparse
 import os
+from abc import abstractmethod
 
 global_bootstrap_nodes = [
     ("router.utorrent.com", 6881),
@@ -66,12 +67,13 @@ def distance_hex(a, b) -> str:
 TransactionId = NewType("TransactionId", bytes)
 
 
-class Bootstrap:
-    active: Dict[TransactionId, trio.MemorySendChannel] = {}
+class Traversal:
     alpha: int = 3
-    queried: Set[Addr] = set()
 
-    def __init__(self, socket, target: typing.ByteString, nursery):
+    def __init__(self, socket, target: typing.ByteString, nursery, local_id: bytes):
+        self.active: Dict[TransactionId, trio.MemorySendChannel] = {}
+        self.queried: Set[Addr] = set()
+        self.local_id = local_id
         self.socket = socket
         self.target = target
         # this is sorted so that the best candidates are at the end, since pop defaults to popping from the back
@@ -121,7 +123,7 @@ class Bootstrap:
     def start_query(self, addr, q, a=None):
         if a is None:
             a = {}
-        a["id"] = self.target
+        a["id"] = self.local_id
         tid = self.new_transaction_id()
         msg = {"t": tid, "y": "q", "q": q, "a": a}
         key = tid
@@ -167,8 +169,12 @@ class Bootstrap:
             self._try_notify_exhausted()
         self.try_do_sends()
 
-    def find_node(self, addr):
-        return self.start_query(addr, "find_node", a={"target": self.target})
+    @abstractmethod
+    def query(self) -> Tuple[str, bencode.Dict]:
+        ...
+
+    def find_node(self):
+        return "find_node", {"target": self.target}
 
     def start_next(self):
         try:
@@ -194,7 +200,7 @@ class Bootstrap:
                 if node_info.id is None
                 else distance_hex(self.target, node_info.id.bytes),
             )
-            return self.find_node(node_info.addr)
+            return self.start_query(addr, *self.query())
         finally:
             self._try_notify_exhausted()
 
@@ -217,6 +223,16 @@ class Bootstrap:
 
     def _exhausted_predicate(self):
         return not self.active and not self.backlog
+
+
+class Bootstrap(Traversal):
+
+    query = Traversal.find_node
+
+
+class SampleInfohashes(Traversal):
+    def query(self):
+        return "sample_infohashes", {"target": self.target}
 
 
 class RoutingTable:
@@ -356,63 +372,83 @@ def string_to_address_tuple(s):
     return host, int(port)
 
 
-async def sample_infohashes_for_db(args, db_conn, socket):
-    queries: Dict[bytes, Any] = {}
-    sender = Sender(socket, db_conn)
+async def sample_infohashes(args, db_conn, socket):
+    local_id = secrets.token_bytes(20)
+    while True:
+        target = secrets.token_bytes(20)
+        logger.info("sampling toward %s", target.hex())
+        async with trio.open_nursery() as nursery:
+            traversal = SampleInfohashes(socket, target, nursery, local_id)
+            nursery.start_soon(receive_for_traversal, socket, traversal, db_conn)
+            traversal.add_candidates(iter(global_bootstrap_nodes))
+            await traversal.wait_exhausted()
+            nursery.cancel_scope.cancel()
 
-    async def handle_received():
-        async for bytes, addr in receiver(socket, db_conn):
-            print(f"received from {addr}: {bytes}")
 
-    async def sample_infohashes():
-        for (addr,) in db_conn.execute(
-            "select distinct remote_addr from operations where type='recv'"
-        ):
-            t = secrets.token_bytes(8)
-            try:
-                await sender.sendto(
-                    bencode.encode_to_bytes(
-                        {
-                            "t": t,
-                            "a": {
-                                "id": secrets.token_bytes(20),
-                                "target": secrets.token_bytes(20),
-                            },
-                            "y": "q",
-                            "q": "sample_infohashes",
-                        }
-                    ),
-                    string_to_address_tuple(addr),
-                )
-            except trio.socket.gaierror as exc:
-                logger.warning("sending to %s: %s", addr, exc)
-            else:
-                print(f"messaged {addr}")
-            await trio.sleep(0.1)
-
-    async with trio.open_nursery() as nursery:
-        nursery.start_soon(sample_infohashes)
-        await handle_received()
+async def receive_for_traversal(socket, traversal, db_conn):
+    async for bytes, addr in receiver(socket, db_conn):
+        traversal.on_reply(bytes, addr)
 
 
 async def bootstrap(args, db_conn, socket):
     sender = Sender(socket, db_conn)
 
-    async def handle_received():
-        async for bytes, addr in receiver(socket, db_conn):
-            bootstrap.on_reply(bytes, addr)
-
     async with trio.open_nursery() as nursery:
         target_id = secrets.token_bytes(20)
         logging.info("bootstrap target id: %s", target_id.hex())
-        bootstrap = Bootstrap(sender, target_id, nursery=nursery)
-        bootstrap.add_candidates(*global_bootstrap_nodes)
-        nursery.start_soon(handle_received)
+        bootstrap = Bootstrap(sender, target_id, nursery, secrets.token_bytes(20))
+        nursery.start_soon(receive_for_traversal, socket, bootstrap, db_conn)
+        bootstrap.add_candidates(iter(global_bootstrap_nodes))
         await bootstrap.wait_exhausted()
         logging.debug("bootstrap exhausted")
         nursery.cancel_scope.cancel()
     for elem in bootstrap.responded:
         print(distance_hex(elem.id.bytes, target_id), elem)
+
+
+async def single_query(args, db_conn, socket):
+    async with trio.open_nursery() as nursery:
+        tid_to_addr = {}
+
+        async def handle_received():
+            async for bytes, addr in receiver(socket, db_conn):
+                reply = bencode.parse_bytes(bytes)
+                print(
+                    f"reply from {addr} (for send to {tid_to_addr[reply[0][b't']]}):\n{pformat(reply)}"
+                )
+
+        nursery.start_soon(handle_received)
+        pending = 0
+        for addr in args.addrs:
+
+            query_args = {"id": args.id}
+            if args.target is not None:
+                query_args["target"] = args.target
+            tid = secrets.token_bytes(8)
+            msg = {
+                "t": tid,
+                "y": "q",
+                "q": args.query,
+                "a": query_args,
+            }
+            try:
+                await socket.sendto(bencode.encode_to_bytes(msg), addr)
+            except trio.socket.gaierror as exc:
+                print(f"sending to {addr}: {exc}", file=sys.stderr)
+            else:
+                pending += 1
+                tid_to_addr[tid] = addr
+        await trio.sleep(10)
+        nursery.cancel_scope.cancel()
+
+
+class TargetAction(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string):
+        if value == 'random':
+            value = secrets.token_bytes(20)
+        else:
+            value = bytes.fromhex(value)
+        setattr(namespace, 'target', value)
 
 
 async def main():
@@ -422,13 +458,24 @@ async def main():
         style="{",
         format="{module}:{lineno} {message}",
     )
+
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(required=True, dest="cmd")
-    sample_infohashes_parser = subparsers.add_parser("sample_infohashes")
-    sample_infohashes_parser.set_defaults(func=sample_infohashes_for_db)
-    bootstrap_parser = subparsers.add_parser("bootstrap")
-    bootstrap_parser.set_defaults(func=bootstrap)
+
+    def add_command(command, func=None):
+        cmd_parser = subparsers.add_parser(command)
+        cmd_parser.set_defaults(func=func or globals()[command])
+        return cmd_parser
+
+    add_command("sample_infohashes")
+    add_command("bootstrap")
+    single_query_parser = add_command("single_query")
+    single_query_parser.add_argument("--addrs", default=global_bootstrap_nodes)
+    single_query_parser.add_argument("query")
+    single_query_parser.add_argument("--id", default=secrets.token_bytes(20))
+    single_query_parser.add_argument("--target", action=TargetAction)
     args = parser.parse_args()
+
     db_conn = sqlite3.connect("herp.db")
     socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
     await socket.bind(("", 42069))
