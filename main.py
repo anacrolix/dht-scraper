@@ -76,7 +76,7 @@ class Bootstrap:
         self.target = target
         # this is sorted so that the best candidates are at the end, since pop defaults to popping from the back
         self.backlog: SortedSet[NodeInfo] = SortedSet(key=self._distance_key)
-        self.exhausted = trio.Event()
+        self.exhausted = trio.Condition()
         self.nursery = nursery
         self.responded: SortedSet[NodeInfo] = SortedSet(key=self._distance_key)
 
@@ -164,33 +164,59 @@ class Bootstrap:
                             )
         finally:
             del self.active[key]
+            self._try_notify_exhausted()
         self.try_do_sends()
 
     def find_node(self, addr):
         return self.start_query(addr, "find_node", a={"target": self.target})
 
     def start_next(self):
-        node_info = self.backlog.pop()
-        if len(self.responded) >= 8:
-            if self._distance_key(node_info) <= self._distance_key(self.responded[-8]):
-                logging.debug("discarding divergent candidate %r", node_info)
+        try:
+            node_info = self.backlog.pop()
+            # We don't drop nodes without an ID, since we don't know what it
+            # is, it could actually be closer.
+            if len(self.responded) >= 8 and node_info.id is not None:
+                # Note that we use >, since we could have multiple candidates
+                # with the same distance for silly reasons.
+                if distance(node_info.id.bytes, self.target) > distance(
+                    self.responded[-8].id.bytes, self.target
+                ):
+                    logging.debug("discarding divergent candidate %r", node_info)
+                    return
+            addr = node_info.addr
+            if addr in self.queried:
+                logging.warning("skipping already queried addr %r", addr)
                 return
-        addr = node_info.addr
-        if addr in self.queried:
-            logging.warning("skipping already queried addr %r", addr)
-            return
-        logger.debug(
-            "picked %r for next query (distance=%s)",
-            node_info,
-            None
-            if node_info.id is None
-            else distance_hex(self.target, node_info.id.bytes),
-        )
-        return self.find_node(node_info.addr)
+            logger.debug(
+                "picked %r for next query (distance=%s)",
+                node_info,
+                None
+                if node_info.id is None
+                else distance_hex(self.target, node_info.id.bytes),
+            )
+            return self.find_node(node_info.addr)
+        finally:
+            self._try_notify_exhausted()
 
     def try_do_sends(self):
         while len(self.active) < self.alpha and self.backlog:
             self.start_next()
+
+    async def wait_exhausted(self):
+        async with self.exhausted:
+            while not self._exhausted_predicate():
+                await self.exhausted.wait()
+
+    def _try_notify_exhausted(self):
+        self.exhausted.acquire_nowait()
+        try:
+            if self._exhausted_predicate():
+                self.exhausted.notify_all()
+        finally:
+            self.exhausted.release()
+
+    def _exhausted_predicate(self):
+        return not self.active and not self.backlog
 
 
 class RoutingTable:
@@ -371,13 +397,22 @@ async def sample_infohashes_for_db(args, db_conn, socket):
 
 async def bootstrap(args, db_conn, socket):
     sender = Sender(socket, db_conn)
+
+    async def handle_received():
+        async for bytes, addr in receiver(socket, db_conn):
+            bootstrap.on_reply(bytes, addr)
+
     async with trio.open_nursery() as nursery:
         target_id = secrets.token_bytes(20)
         logging.info("bootstrap target id: %s", target_id.hex())
         bootstrap = Bootstrap(sender, target_id, nursery=nursery)
         bootstrap.add_candidates(*global_bootstrap_nodes)
-        async for bytes, addr in receiver(socket, db_conn):
-            bootstrap.on_reply(bytes, addr)
+        nursery.start_soon(handle_received)
+        await bootstrap.wait_exhausted()
+        logging.debug("bootstrap exhausted")
+        nursery.cancel_scope.cancel()
+    for elem in bootstrap.responded:
+        print(distance_hex(elem.id.bytes, target_id), elem)
 
 
 async def main():
