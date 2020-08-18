@@ -59,6 +59,10 @@ def distance(a, b: typing.ByteString) -> int:
     return int.from_bytes(a, "big") ^ int.from_bytes(b, "big")
 
 
+def distance_hex(a, b) -> str:
+    return distance(a, b).to_bytes(20, "big").hex()
+
+
 TransactionId = NewType("TransactionId", bytes)
 
 
@@ -180,7 +184,7 @@ class Bootstrap:
             node_info,
             None
             if node_info.id is None
-            else distance(self.target, node_info.id.bytes).to_bytes(20, "big").hex(),
+            else distance_hex(self.target, node_info.id.bytes),
         )
         return self.find_node(node_info.addr)
 
