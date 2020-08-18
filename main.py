@@ -292,8 +292,6 @@ class MessageWriter:
                 value,
             ],
         )
-        if parent_id is None:
-            self.on_root_insert(self.cursor.lastrowid)
         self._cur_field_context().index += 1
 
     def _cur_depth(self):
