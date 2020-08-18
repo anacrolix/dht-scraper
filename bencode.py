@@ -97,16 +97,19 @@ class StreamReader(Protocol):
         ...
 
 
+BytesType = bytes
+
+
 @dataclass
 class BytesStreamReader:
-    bytes: typing.ByteString
+    bytes: BytesType
 
     def peek_one(self) -> Optional[int]:
         if len(self.bytes) == 0:
             return None
         return self.bytes[0]
 
-    def read_until(self, until: bytes) -> bytes:
+    def read_until(self, until: BytesType) -> BytesType:
         index = self.bytes.index(until)
         ret = self.bytes[:index]
         self.bytes = self.bytes[index + len(until) :]
