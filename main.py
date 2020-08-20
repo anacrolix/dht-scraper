@@ -488,7 +488,7 @@ async def main():
     single_query_parser.add_argument("--target", action=TargetAction)
     args = parser.parse_args()
 
-    db_conn = sqlite3.connect("herp.db")
+    db_conn = sql.connect()
     # if args.clobber_db:
     #     drop_tables(tables)
     # create_tables(tables, safe=not args.clobber_db)
