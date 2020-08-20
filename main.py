@@ -17,7 +17,9 @@ import argparse
 import os
 from abc import abstractmethod
 
-global_bootstrap_nodes = [
+Addr = Tuple[str, int]
+
+global_bootstrap_nodes: List[Addr] = [
     ("router.utorrent.com", 6881),
     ("router.bittorrent.com", 6881),
     ("dht.transmissionbt.com", 6881),
@@ -45,9 +47,6 @@ class PeerId:
 
     def __repr__(self):
         return self.bytes.hex()
-
-
-Addr = Tuple[str, int]
 
 
 @dataclass(unsafe_hash=True, order=True)
@@ -98,7 +97,7 @@ class Traversal:
     def new_transaction_id(self) -> TransactionId:
         return TransactionId(secrets.token_bytes(8))
 
-    def add_candidates(self, *addrs):
+    def add_candidates(self, *addrs: Addr):
         self.backlog.update([NodeInfo(None, addr) for addr in addrs])
         self.try_do_sends()
 
@@ -141,7 +140,13 @@ class Traversal:
             self.backlog.add(NodeInfo(PeerId(id), (socket.inet_ntoa(packed_ip), port),))
         self.try_do_sends()
 
-    async def do_query(self, bytes, addr: Addr, response_receiver, key: TransactionId):
+    async def do_query(
+        self,
+        bytes,
+        addr: Addr,
+        response_receiver: trio.MemoryReceiveChannel,
+        key: TransactionId,
+    ):
         try:
             async with response_receiver:
                 try:
@@ -241,10 +246,12 @@ class RoutingTable:
 
 
 @dataclass
-class Sender:
+class BaseRecordedSocket:
     socket: typing.Any
     db_conn: typing.Any
 
+
+class Sender(BaseRecordedSocket):
     async def sendto(self, bytes, addr):
         try:
             await self.socket.sendto(
@@ -260,8 +267,18 @@ class Sender:
                         self.db_conn, "send", addr_for_db(addr), bytes, exc_value
                     )
                 except ValueError:
-                    breakpoint()
                     raise
+
+
+class Receiver(BaseRecordedSocket):
+    async def recvfrom(self, amount) -> Tuple[bytes, Addr]:
+        bytes, addr = await self.socket.recvfrom(amount)
+        record_operation(self.db_conn, "recv", addr_for_db(addr), bytes, None)
+        return bytes, addr
+
+
+class RecordedSocket(Sender, Receiver):
+    pass
 
 
 async def ping_bootstrap_nodes(sender, db_conn):
@@ -360,13 +377,6 @@ class MessageWriter:
         self._insert("s", value)
 
 
-async def receiver(socket, db_conn):
-    while True:
-        bytes, addr = await socket.recvfrom(0x1000)
-        record_operation(db_conn, "recv", addr_for_db(addr), bytes, None)
-        yield bytes, addr
-
-
 def string_to_address_tuple(s):
     host, port = s.rsplit(":")
     return host, int(port)
@@ -379,26 +389,26 @@ async def sample_infohashes(args, db_conn, socket):
         logger.info("sampling toward %s", target.hex())
         async with trio.open_nursery() as nursery:
             traversal = SampleInfohashes(socket, target, nursery, local_id)
-            nursery.start_soon(receive_for_traversal, socket, traversal, db_conn)
-            traversal.add_candidates(iter(global_bootstrap_nodes))
+            nursery.start_soon(receive_for_traversal, socket, traversal)
+            traversal.add_candidates(*global_bootstrap_nodes)
             await traversal.wait_exhausted()
             nursery.cancel_scope.cancel()
 
 
-async def receive_for_traversal(socket, traversal, db_conn):
-    async for bytes, addr in receiver(socket, db_conn):
+async def receive_for_traversal(socket, traversal):
+    while True:
+        bytes, addr = await socket.recvfrom(0x1000)
         traversal.on_reply(bytes, addr)
 
 
 async def bootstrap(args, db_conn, socket):
-    sender = Sender(socket, db_conn)
 
     async with trio.open_nursery() as nursery:
         target_id = secrets.token_bytes(20)
         logging.info("bootstrap target id: %s", target_id.hex())
-        bootstrap = Bootstrap(sender, target_id, nursery, secrets.token_bytes(20))
-        nursery.start_soon(receive_for_traversal, socket, bootstrap, db_conn)
-        bootstrap.add_candidates(iter(global_bootstrap_nodes))
+        bootstrap = Bootstrap(socket, target_id, nursery, secrets.token_bytes(20))
+        nursery.start_soon(receive_for_traversal, socket, bootstrap)
+        bootstrap.add_candidates(*global_bootstrap_nodes)
         await bootstrap.wait_exhausted()
         logging.debug("bootstrap exhausted")
         nursery.cancel_scope.cancel()
@@ -411,7 +421,8 @@ async def single_query(args, db_conn, socket):
         tid_to_addr = {}
 
         async def handle_received():
-            async for bytes, addr in receiver(socket, db_conn):
+            while True:
+                bytes, addr = await socket.recvfrom(0x1000)
                 reply = bencode.parse_bytes(bytes)
                 print(
                     f"reply from {addr} (for send to {tid_to_addr[reply[0][b't']]}):\n{pformat(reply)}"
@@ -444,11 +455,11 @@ async def single_query(args, db_conn, socket):
 
 class TargetAction(argparse.Action):
     def __call__(self, parser, namespace, value, option_string):
-        if value == 'random':
+        if value == "random":
             value = secrets.token_bytes(20)
         else:
             value = bytes.fromhex(value)
-        setattr(namespace, 'target', value)
+        setattr(namespace, "target", value)
 
 
 async def main():
@@ -460,6 +471,7 @@ async def main():
     )
 
     parser = argparse.ArgumentParser()
+    # parser.add_argument("--clobber-db", action="store_true")
     subparsers = parser.add_subparsers(required=True, dest="cmd")
 
     def add_command(command, func=None):
@@ -477,9 +489,12 @@ async def main():
     args = parser.parse_args()
 
     db_conn = sqlite3.connect("herp.db")
+    # if args.clobber_db:
+    #     drop_tables(tables)
+    # create_tables(tables, safe=not args.clobber_db)
     socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
     await socket.bind(("", 42069))
-    await args.func(args, db_conn, socket)
+    await args.func(args, db_conn, RecordedSocket(socket, db_conn))
 
 
 if __name__ == "__main__":
