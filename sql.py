@@ -16,7 +16,7 @@ if USE_APSW:
     def connect():
         db = apsw.Connection("herp.db")
         db.createscalarfunction("bencode_get", bencode_get, deterministic=True)
-        db.createmodule("chunk_bytes", ChunkBytes)
+        db.createmodule("chunk", Chunk)
         return db
 
 
@@ -25,7 +25,7 @@ else:
 
     def connect():
         db = sqlite3.connect("herp.db")
-        ChunkBytes.register(db)
+        Chunk.register(db)
         db.create_function("bencode_get", -1, bencode_get, deterministic=True)
         return db
 
@@ -73,18 +73,19 @@ def lookup(key, bytes):
         if key == bencode.parse_one_from_bytes(bytes):
             return discard(bytes)
         bytes = discard(bytes, 2)
+    raise SequenceEnded
 
 
 def bencode_get_bytes(bytes, *path):
     if len(path) == 0:
         return bytes
     key, *rest = path
-    if isinstance(key, int):
-        try:
+    try:
+        if isinstance(key, int):
             return bencode_get_bytes(discard(bytes[1:], key), *rest)
-        except SequenceEnded:
-            return
-    return bencode_get_bytes(lookup(key, bytes[1:]), *rest)
+        return bencode_get_bytes(lookup(key, bytes[1:]), *rest)
+    except SequenceEnded:
+        return
 
 
 def bencode_get(bytes, *path):
@@ -113,20 +114,20 @@ class BencodeGet(TableFunction):
         eval(self.lookup)
 
 
-class ChunkBytes(TableFunction):
-    params = ["bytes", "size"]
-    columns = ["infohash"]
-    name = "chunk_bytes"
+class Chunk(TableFunction):
+    params = ["input", "size"]
+    columns = ["chunk"]
+    name = "chunk"
 
-    def initialize(self, bytes, size):
-        self.bytes = bytes
+    def initialize(self, input, size):
+        self.input = input
         self.size = size
 
     def iterate(self, idx):
-        if self.bytes is None or len(self.bytes) == 0:
+        if self.input is None or len(self.input) == 0:
             raise StopIteration
-        bytes, self.bytes = self.bytes[: self.size], self.bytes[self.size :]
-        return (bytes,)
+        chunk, self.input = self.input[: self.size], self.input[self.size :]
+        return (chunk,)
 
 
 @dataclass
@@ -189,7 +190,7 @@ if __name__ == "__main__":
 
         def execute(*args, **kwargs):
             for a in db.execute(*args, **kwargs):
-                print(a)
+                pprint(a)
 
         import code
 
