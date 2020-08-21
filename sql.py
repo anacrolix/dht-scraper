@@ -1,10 +1,3 @@
-# def drop_tables(db):
-# 	db.execute('drop table messages')
-# 	db.execute('drop table operations')
-
-# def create_tables(db):
-# 	db.execute('create
-
 from vtfunc import TableFunction
 import apsw
 from dataclasses import dataclass
@@ -13,26 +6,28 @@ from typing import *
 import bencode
 from my_types import *
 import sqlite3
+import os
+
+DB_PATH = "herp.db"
+USE_APSW = os.environ.get("USE_APSW", False)
+
+if USE_APSW:
+
+    def connect():
+        db = apsw.Connection("herp.db")
+        db.createscalarfunction("bencode_get", bencode_get, deterministic=True)
+        db.createmodule("chunk_bytes", ChunkBytes)
+        return db
 
 
-class ShellWrapper:
+else:
+    sqlite3.enable_callback_tracebacks(True)
 
-    def __init__(self, wrappee):
-        self.__wrappee = wrappee
-
-    @property
-    def filename(self):
-        return 'herp.db'
-
-    def __getattr__(self, name):
-        return getattr(self.__wrappee, name)
-
-def connect():
-    db = sqlite3.connect("herp.db")
-    return ShellWrapper(db)
-    # db = apsw.Connection('herp.db')
-    # ChunkBytes.register(db)
-    return db
+    def connect():
+        db = sqlite3.connect("herp.db")
+        ChunkBytes.register(db)
+        db.create_function("bencode_get", -1, bencode_get, deterministic=True)
+        return db
 
 
 def dropwhile(f, bytes):
@@ -48,37 +43,51 @@ def drop_until_end(bytes):
     return bytes[1:]
 
 
-def discard(bytes):
-    c = bytes[0]
-    if c in map(ord, [b"l", b"d"]):
-        return drop_until_end(bytes[1:])
-    elif c == ord("i"):
-        return bytes.partition(b"e")[2]
-    else:
-        len, _, bytes = bytes.partition(b":")
-        return bytes[int(len) :]
+def discard(bytes, n=1):
+    def discard_one(bytes):
+        c = bytes[0]
+        if c in map(ord, ["l", "d"]):
+            return drop_until_end(bytes[1:])
+        elif c == ord("i"):
+            return bytes.partition(b"e")[2]
+        else:
+            len, _, bytes = bytes.partition(b":")
+            return bytes[int(len) :]
+
+    while n > 0:
+        bytes = discard_one(bytes)
+        n -= 1
+    return bytes
 
 
 def lookup(key, bytes):
-    while not bytes.startswith(b"e"):
+    if isinstance(key, str):
+        key = key.encode()
+    while bytes[:1] != b"e":
         if key == bencode.parse_one_from_bytes(bytes):
             return discard(bytes)
-        bytes = discard(discard(bytes))
+        bytes = discard(bytes, 2)
+
+def bencode_get_bytes(bytes, *path):
+    if len(path) == 0:
+        return bytes
+    if isinstance(path[0], int):
+        return discard(path[0], bytes[1:]
+    key, *rest = path
+    if isinstance(key, str):
+        key = key.encode()
+    return bencode_get_bytes(lookup(key, bytes[1:]))
 
 
 def bencode_get(bytes, *path):
     if bytes is None:
         return
-    if len(path) == 0:
-        object = bencode.parse_one_from_bytes(bytes)
-        if isinstance(object, (dict, list)):
-            return None
-    if isinstance(path[0], int):
-        return bencode_get(drop(path[0], bytes[1:]), path[1:])
-    key, *rest = path
-    if isinstance(key, str):
-        key = key.encode()
-    return bencode_get(lookup(key, bytes[1:]))
+    bytes = bencode_get_bytes(bytes, *path)
+    object = bencode.parse_one_from_bytes(bytes)
+    if False and isinstance(object, (dict, list)):
+        return None
+    else:
+        return object
 
 
 class BencodeGet(TableFunction):
@@ -162,6 +171,16 @@ def addr_for_db(addr: Tuple[str, int]) -> str:
 
 if __name__ == "__main__":
     db = connect()
-    shell = apsw.Shell(db=db)
-    shell.process_command(".nullvalue NULL")
-    shell.cmdloop()
+    if USE_APSW:
+        shell = apsw.Shell(db=db)
+        shell.process_command(".nullvalue NULL")
+        shell.cmdloop()
+    else:
+
+        def execute(*args, **kwargs):
+            for a in db.execute(*args, **kwargs):
+                print(a)
+
+        import code
+
+        code.interact(local=locals())
