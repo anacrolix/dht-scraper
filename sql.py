@@ -43,6 +43,10 @@ def drop_until_end(bytes):
     return bytes[1:]
 
 
+class SequenceEnded(Exception):
+    pass
+
+
 def discard(bytes, n=1):
     def discard_one(bytes):
         c = bytes[0]
@@ -50,6 +54,8 @@ def discard(bytes, n=1):
             return drop_until_end(bytes[1:])
         elif c == ord("i"):
             return bytes.partition(b"e")[2]
+        elif c == ord("e"):
+            raise SequenceEnded(bytes)
         else:
             len, _, bytes = bytes.partition(b":")
             return bytes[int(len) :]
@@ -74,7 +80,10 @@ def bencode_get_bytes(bytes, *path):
         return bytes
     key, *rest = path
     if isinstance(key, int):
-        return bencode_get_bytes(discard(bytes[1:], key), *rest)
+        try:
+            return bencode_get_bytes(discard(bytes[1:], key), *rest)
+        except SequenceEnded:
+            return
     return bencode_get_bytes(lookup(key, bytes[1:]), *rest)
 
 
@@ -82,6 +91,8 @@ def bencode_get(bytes, *path):
     if bytes is None:
         return
     bytes = bencode_get_bytes(bytes, *path)
+    if bytes is None:
+        return
     object = bencode.parse_one_from_bytes(bytes)
     if False and isinstance(object, (dict, list)):
         return None
