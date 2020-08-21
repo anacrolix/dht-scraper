@@ -68,15 +68,14 @@ def lookup(key, bytes):
             return discard(bytes)
         bytes = discard(bytes, 2)
 
+
 def bencode_get_bytes(bytes, *path):
     if len(path) == 0:
         return bytes
-    if isinstance(path[0], int):
-        return discard(path[0], bytes[1:]
     key, *rest = path
-    if isinstance(key, str):
-        key = key.encode()
-    return bencode_get_bytes(lookup(key, bytes[1:]))
+    if isinstance(key, int):
+        return bencode_get_bytes(discard(bytes[1:], key), *rest)
+    return bencode_get_bytes(lookup(key, bytes[1:]), *rest)
 
 
 def bencode_get(bytes, *path):
