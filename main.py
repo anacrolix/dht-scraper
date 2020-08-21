@@ -16,8 +16,8 @@ from typing import Union, Tuple
 import argparse
 import os
 from abc import abstractmethod
-
-Addr = Tuple[str, int]
+import sql
+from my_types import Addr
 
 global_bootstrap_nodes: List[Addr] = [
     ("router.utorrent.com", 6881),
@@ -29,10 +29,6 @@ global_bootstrap_nodes: List[Addr] = [
 ]
 
 logger = logging.root
-
-
-def addr_for_db(addr: Tuple[str, int]) -> str:
-    return addr[0] + ":" + str(addr[1])
 
 
 @dataclass(unsafe_hash=True)
@@ -245,42 +241,6 @@ class RoutingTable:
         self.buckets = []
 
 
-@dataclass
-class BaseRecordedSocket:
-    socket: typing.Any
-    db_conn: typing.Any
-
-
-class Sender(BaseRecordedSocket):
-    async def sendto(self, bytes, addr):
-        try:
-            await self.socket.sendto(
-                bytes, addr,
-            )
-        finally:
-            exc_value = sys.exc_info()[1]
-            if exc_value is not None:
-                exc_value = str(exc_value)
-            with self.db_conn:
-                try:
-                    record_operation(
-                        self.db_conn, "send", addr_for_db(addr), bytes, exc_value
-                    )
-                except ValueError:
-                    raise
-
-
-class Receiver(BaseRecordedSocket):
-    async def recvfrom(self, amount) -> Tuple[bytes, Addr]:
-        bytes, addr = await self.socket.recvfrom(amount)
-        record_operation(self.db_conn, "recv", addr_for_db(addr), bytes, None)
-        return bytes, addr
-
-
-class RecordedSocket(Sender, Receiver):
-    pass
-
-
 async def ping_bootstrap_nodes(sender, db_conn):
     for addr in global_bootstrap_nodes:
         bytes = "".join(
@@ -289,92 +249,6 @@ async def ping_bootstrap_nodes(sender, db_conn):
             )
         ).encode()
         sender.sendto(bytes, addr)
-
-
-def new_message_id(db_conn: sqlite3.Connection) -> int:
-    cursor = db_conn.cursor()
-    cursor.execute("insert into messages default values")
-    return cursor.lastrowid
-
-
-def record_operation(
-    db_conn, type: str, remote_addr: str, bytes: bytes, error: Union[str, None]
-):
-    with db_conn:
-        message_id = new_message_id(db_conn)
-        db_conn.execute(
-            "insert into operations (message_id, remote_addr, type, error) values (?, ?, ?, ?)",
-            [message_id, remote_addr, type, error],
-        )
-        record_packet(bytes, db_conn, message_id)
-
-
-def record_packet(bytes, db_conn, top_id):
-    # logging.debug("recording packet %r", bytes)
-    bencode.StreamDecoder(bencode.BytesStreamReader(bytes)).visit(
-        MessageWriter(db_conn.cursor(), top_id)
-    )
-
-
-@dataclass
-class FieldContext:
-    parent_id: typing.Union[None, int]
-    index: int = 0
-
-
-class MessageWriter:
-
-    cursor: sqlite3.Cursor
-
-    def __init__(self, cursor, top_id):
-        self.cursor = cursor
-        self.field_contexts = [FieldContext(top_id)]
-
-    def _cur_parent_id(self) -> typing.Union[int, None]:
-        return self.field_contexts[-1].parent_id
-
-    def _cur_field_context(self) -> FieldContext:
-        return self.field_contexts[-1]
-
-    def _insert_code(self, code):
-        self._insert(code, None)
-
-    def _insert(self, code, value):
-        parent_id = self._cur_parent_id()
-        self.cursor.execute(
-            """insert into messages (parent_id, "index", depth, type, value) values (?, ?, ?, ?, ?)""",
-            [
-                parent_id,
-                self._cur_field_context().index,
-                self._cur_depth(),
-                code,
-                value,
-            ],
-        )
-        self._cur_field_context().index += 1
-
-    def _cur_depth(self):
-        return len(self.field_contexts) - 1
-
-    def _start(self, code):
-        self._insert_code(code)
-        self.field_contexts.append(FieldContext(self.cursor.lastrowid))
-
-    def start_dict(self):
-        self._start("d")
-
-    def start_list(self):
-        self._start("l")
-
-    def end(self):
-        self._insert_code("e")
-        self.field_contexts.pop()
-
-    def int(self, value):
-        self._insert("i", value)
-
-    def str(self, value):
-        self._insert("s", value)
 
 
 def string_to_address_tuple(s):
@@ -494,7 +368,7 @@ async def main():
     # create_tables(tables, safe=not args.clobber_db)
     socket = trio.socket.socket(type=trio.socket.SOCK_DGRAM)
     await socket.bind(("", 42069))
-    await args.func(args, db_conn, RecordedSocket(socket, db_conn))
+    await args.func(args, db_conn, sql.RecordedSocket(socket, db_conn))
 
 
 if __name__ == "__main__":
