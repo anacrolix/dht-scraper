@@ -7,6 +7,7 @@ import bencode
 from my_types import *
 import sqlite3
 import os
+from pprint import pprint
 
 DB_PATH = "herp.db"
 USE_APSW = os.environ.get("USE_APSW", False)
