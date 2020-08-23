@@ -339,7 +339,7 @@ class TargetAction(argparse.Action):
 async def main():
     logging.Formatter.default_msec_format = "%s.%03d"
     logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOGLEVEL", "INFO")),
+        level=getattr(logging, os.environ.get("LOGLEVEL", "INFO").upper()),
         style="{",
         format="{module}:{lineno} {message}",
     )
