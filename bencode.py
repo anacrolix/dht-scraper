@@ -2,7 +2,7 @@ from typing import Union, Any, Protocol, Optional, Iterable
 from dataclasses import dataclass
 import itertools
 import typing
-
+import collections
 
 Dict = typing.Dict[bytes, Any]
 Object = Union[Dict, int, bytes, list]
@@ -176,7 +176,7 @@ def parse_one(tokens) -> Object:
     t = next(tokens)
     if t == StartDict:
         it = parse_until_end(tokens)
-        return dict(itertools.zip_longest(it, it))
+        return Dict(itertools.zip_longest(it, it))
     elif t == StartList:
         return list(parse_until_end(tokens))
     else:
@@ -197,3 +197,10 @@ def parse_bytes(bytes):
 
 def parse_one_from_bytes(bytes) -> Object:
     return parse_bytes(bytes)[0]
+
+
+class Dict(collections.UserDict):
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            key = key.encode()
+        return super().__getitem__(key)

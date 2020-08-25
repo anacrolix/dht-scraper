@@ -1,4 +1,5 @@
 from bencode import *
+import pytest
 
 
 def example_ping_query():
@@ -24,3 +25,13 @@ def test_tokenize_ping():
 def test_parse_bytes_one():
     assert parse_one_from_bytes(b"de") == {}
     assert parse_one_from_bytes(encoded_example_ping_query) == example_ping_query()
+
+
+def test_parsed_dict():
+    d = parse_one_from_bytes(b"d5:hello5:worlde")
+    assert d["hello"] == b"world"
+    assert d[b"hello"] == b"world"
+    with pytest.raises(KeyError):
+        d["nope"]
+    with pytest.raises(KeyError):
+        d[b"nope"]
