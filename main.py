@@ -18,6 +18,7 @@ import os
 from abc import abstractmethod
 import sql
 from my_types import Addr
+from util import chunk_bytes
 
 global_bootstrap_nodes: List[Addr] = [
     ("router.utorrent.com", 6881),

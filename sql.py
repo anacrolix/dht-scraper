@@ -8,6 +8,7 @@ from my_types import *
 import sqlite3
 import os
 from pprint import pprint
+from util import chunk_bytes
 
 DB_PATH = "herp.db"
 USE_APSW = os.environ.get("USE_APSW", False)
@@ -121,14 +122,10 @@ class Chunk(TableFunction):
     name = "chunk"
 
     def initialize(self, input, size):
-        self.input = input
-        self.size = size
+        self.__iter = chunk_bytes(input, size)
 
     def iterate(self, idx):
-        if self.input is None or len(self.input) == 0:
-            raise StopIteration
-        chunk, self.input = self.input[: self.size], self.input[self.size :]
-        return (chunk,)
+        return (next(self.__iter),)
 
 
 @dataclass
