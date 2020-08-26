@@ -19,6 +19,7 @@ from abc import abstractmethod
 import sql
 from my_types import Addr
 from util import chunk_bytes
+from itertools import repeat
 
 global_bootstrap_nodes: List[Addr] = [
     ("router.utorrent.com", 6881),
@@ -233,21 +234,40 @@ class Bootstrap(Traversal):
 class SampleInfohashes(Traversal):
     def __init__(self, *args, **kwargs):
         self.__sampled_infohashes: Set[bytes] = set()
-        super().__init__(*args, **kwargs)
+        self.__db_conn = args[0]
+        super().__init__(*args[1:], **kwargs)
 
     def query(self):
         return "sample_infohashes", {"target": self.target}
 
     def on_response(self, response):
+        if "r" not in response:
+            return
         try:
-            samples = response["r"]["samples"]
-        except KeyError:
-            pass
-        else:
-            for ih in chunk_bytes(samples, 20, strict=True):
-                if ih not in self.__sampled_infohashes:
-                    logging.info("got new infohash %s", ih.hex())
-                    self.__sampled_infohashes.add(ih)
+            with self.__db_conn:
+                cursor = self.__db_conn.cursor()
+                cursor.execute(
+                    "insert into sample_infohashes_response(time, query_t, num, interval) values (datetime('now'), ?, ?, ?)",
+                    (response["t"], response["r"].get("num"), response["r"].get("interval")),
+                )
+                response_id = cursor.lastrowid
+                try:
+                    samples = response["r"]["samples"]
+                except KeyError:
+                    pass
+                else:
+                    infohashes = list(chunk_bytes(samples, 20, strict=True))
+                    cursor.executemany(
+                        "insert into sample_infohashes_response_infohash(response_id, infohash) values (?, ?)",
+                        zip(repeat(response_id), infohashes),
+                    )
+                    for ih in infohashes:
+                        if ih not in self.__sampled_infohashes:
+                            logging.info("got new infohash %s", ih.hex())
+                            self.__sampled_infohashes.add(ih)
+        except Exception:
+            logging.error('exception handling\n%s', pformat(response))
+            raise
 
 
 class RoutingTable:
@@ -276,7 +296,7 @@ async def sample_infohashes(args, db_conn, socket):
         target = secrets.token_bytes(20)
         logger.info("sampling toward %s", target.hex())
         async with trio.open_nursery() as nursery:
-            traversal = SampleInfohashes(socket, target, nursery, local_id)
+            traversal = SampleInfohashes(db_conn, socket, target, nursery, local_id)
             nursery.start_soon(receive_for_traversal, socket, traversal)
             traversal.add_candidates(
                 *map(

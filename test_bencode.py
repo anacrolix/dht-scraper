@@ -35,3 +35,5 @@ def test_parsed_dict():
         d["nope"]
     with pytest.raises(KeyError):
         d[b"nope"]
+    assert "hello" in d
+    assert "nope" not in d

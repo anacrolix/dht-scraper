@@ -2,7 +2,7 @@ from typing import Union, Any, Protocol, Optional, Iterable
 from dataclasses import dataclass
 import itertools
 import typing
-import collections
+import collections, collections.abc
 
 Dict = typing.Dict[bytes, Any]
 Object = Union[Dict, int, bytes, list]
@@ -199,8 +199,14 @@ def parse_one_from_bytes(bytes) -> Object:
     return parse_bytes(bytes)[0]
 
 
-class Dict(collections.UserDict):
-    def __getitem__(self, key):
+class Dict(collections.UserDict, collections.abc.Mapping):
+    def __cast_key(self, key):
         if isinstance(key, str):
-            key = key.encode()
-        return super().__getitem__(key)
+            return key.encode()
+        return key
+
+    def __getitem__(self, key):
+        return super().__getitem__(self.__cast_key(key))
+
+    def __contains__(self, key):
+        return super().__contains__(self.__cast_key(key))
