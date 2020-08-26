@@ -112,9 +112,6 @@ class Traversal:
             logging.warning(
                 "got reply from %r with no replier id:\n%s", src, pformat(msg)
             )
-        else:
-            pass
-            # logging.debug("got reply from %s at %s", replier_id.hex(), src)
 
     def start_query(self, addr, q, a=None):
         if a is None:
@@ -153,6 +150,7 @@ class Traversal:
                 else:
                     with trio.move_on_after(5):
                         reply: bencode.Dict = await response_receiver.receive()
+                        self.on_response(reply)
                         if b"r" in reply:
                             reply_id: bytes = reply[b"r"][b"id"]
                             self.responded.add(NodeInfo(PeerId(reply_id), addr))
@@ -168,8 +166,11 @@ class Traversal:
                             )
         finally:
             del self.active[key]
-            self._try_notify_exhausted()
+            await self._try_notify_exhausted()
         self.try_do_sends()
+
+    def on_response(self, response: bencode.Dict):
+        pass
 
     @abstractmethod
     def query(self) -> Tuple[str, bencode.Dict]:
@@ -204,7 +205,7 @@ class Traversal:
             )
             return self.start_query(addr, *self.query())
         finally:
-            self._try_notify_exhausted()
+            self.nursery.start_soon(self._try_notify_exhausted)
 
     def try_do_sends(self):
         while len(self.active) < self.alpha and self.backlog:
@@ -215,13 +216,10 @@ class Traversal:
             while not self._exhausted_predicate():
                 await self.exhausted.wait()
 
-    def _try_notify_exhausted(self):
-        self.exhausted.acquire_nowait()
-        try:
+    async def _try_notify_exhausted(self):
+        async with self.exhausted:
             if self._exhausted_predicate():
                 self.exhausted.notify_all()
-        finally:
-            self.exhausted.release()
 
     def _exhausted_predicate(self):
         return not self.active and not self.backlog
@@ -233,8 +231,23 @@ class Bootstrap(Traversal):
 
 
 class SampleInfohashes(Traversal):
+    def __init__(self, *args, **kwargs):
+        self.__sampled_infohashes: Set[bytes] = set()
+        super().__init__(*args, **kwargs)
+
     def query(self):
         return "sample_infohashes", {"target": self.target}
+
+    def on_response(self, response):
+        try:
+            samples = response["r"]["samples"]
+        except KeyError:
+            pass
+        else:
+            for ih in chunk_bytes(samples, 20, strict=True):
+                if ih not in self.__sampled_infohashes:
+                    logging.info("got new infohash %s", ih.hex())
+                    self.__sampled_infohashes.add(ih)
 
 
 class RoutingTable:
@@ -265,7 +278,14 @@ async def sample_infohashes(args, db_conn, socket):
         async with trio.open_nursery() as nursery:
             traversal = SampleInfohashes(socket, target, nursery, local_id)
             nursery.start_soon(receive_for_traversal, socket, traversal)
-            traversal.add_candidates(*global_bootstrap_nodes)
+            traversal.add_candidates(
+                *map(
+                    lambda x: string_to_address_tuple(x[0]),
+                    db_conn.execute(
+                        "select remote_addr from operation where type='recv'"
+                    ),
+                )
+            )
             await traversal.wait_exhausted()
             nursery.cancel_scope.cancel()
 

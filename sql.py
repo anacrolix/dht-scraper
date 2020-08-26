@@ -25,8 +25,8 @@ if USE_APSW:
 else:
     sqlite3.enable_callback_tracebacks(True)
 
-    def connect():
-        db = sqlite3.connect("herp.db")
+    def connect(database="herp.db"):
+        db = sqlite3.connect(database)
         Chunk.register(db)
         db.create_function("bencode_get", -1, bencode_get, deterministic=True)
         return db
@@ -97,7 +97,7 @@ def bencode_get(bytes, *path):
     if bytes is None:
         return
     object = bencode.parse_one_from_bytes(bytes)
-    if False and isinstance(object, (dict, list)):
+    if isinstance(object, (dict, list)):
         return None
     else:
         return object
@@ -169,7 +169,7 @@ def record_operation(
 ):
     with db_conn:
         db_conn.execute(
-            "insert into operation (payload, remote_addr, type, error, when) values (?, ?, ?, ?, datetime('now'))",
+            "insert into operation (payload, remote_addr, type, error, datetime) values (?, ?, ?, ?, datetime('now'))",
             [bytes, remote_addr, type, error],
         )
 
@@ -189,6 +189,10 @@ if __name__ == "__main__":
         def execute(*args, **kwargs):
             for a in db.execute(*args, **kwargs):
                 pprint(a)
+
+        execute(
+            "select distinct typeof(a) from (select bencode_get(payload, 'r') as a from operation)"
+        )
 
         import code
 
