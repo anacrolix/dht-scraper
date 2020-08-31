@@ -20,6 +20,7 @@ import sql
 from my_types import Addr
 from util import chunk_bytes
 from itertools import repeat
+import hashlib
 
 global_bootstrap_nodes: List[Addr] = [
     ("router.utorrent.com", 6881),
@@ -103,10 +104,10 @@ class Traversal:
         msg = typing.cast(bencode.Dict, bencode.parse_one_from_bytes(reply))
         # logging.debug("got reply:\n%s", pformat(msg))
         key = msg[b"t"]
-        if key not in (active := self.active):
+        if key not in self.active:
             logging.warning("got unexpected reply: %r", key)
             return
-        self.nursery.start_soon(active[key].send, msg)
+        self.nursery.start_soon(self.active[key].send, msg)
         try:
             replier_id = msg[b"r"][b"id"]
         except KeyError:
@@ -248,7 +249,11 @@ class SampleInfohashes(Traversal):
                 cursor = self.__db_conn.cursor()
                 cursor.execute(
                     "insert into sample_infohashes_response(time, query_t, num, interval) values (datetime('now'), ?, ?, ?)",
-                    (response["t"], response["r"].get("num"), response["r"].get("interval")),
+                    (
+                        response["t"],
+                        response["r"].get("num"),
+                        response["r"].get("interval"),
+                    ),
                 )
                 response_id = cursor.lastrowid
                 try:
@@ -266,7 +271,7 @@ class SampleInfohashes(Traversal):
                             logging.info("got new infohash %s", ih.hex())
                             self.__sampled_infohashes.add(ih)
         except Exception:
-            logging.error('exception handling\n%s', pformat(response))
+            logging.error("exception handling\n%s", pformat(response))
             raise
 
 
@@ -377,6 +382,20 @@ class TargetAction(argparse.Action):
         setattr(namespace, "target", value)
 
 
+async def check_infos(args, db_conn, socket):
+    total = 0
+    correct = 0
+    for infohash, bytes in db_conn.execute(
+        "select infohash, bytes from info where bytes is not null"
+    ):
+        total += 1
+        if hashlib.new("sha1", bytes).hexdigest() == infohash:
+            correct += 1
+        else:
+            logging.error("bad info bytes for %s", infohash)
+    print(f'{correct}/{total} infos are valid', file=sys.stderr)
+
+
 async def main():
     logging.Formatter.default_msec_format = "%s.%03d"
     logging.basicConfig(
@@ -396,6 +415,7 @@ async def main():
 
     add_command("sample_infohashes")
     add_command("bootstrap")
+    add_command("check_infos")
     single_query_parser = add_command("single_query")
     single_query_parser.add_argument("--addrs", default=global_bootstrap_nodes)
     single_query_parser.add_argument("query")
