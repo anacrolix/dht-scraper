@@ -395,6 +395,17 @@ async def check_infos(args, db_conn, socket):
             logging.error("bad info bytes for %s", infohash)
     print(f'{correct}/{total} infos are valid', file=sys.stderr)
 
+async def list_files(args, db_conn, socket):
+    total = 0
+    correct = 0
+    for infohash, bytes in db_conn.execute(
+        "select infohash, bytes from info where bytes is not null"
+    ):
+        info = bencode.parse_one_from_bytes(bytes)
+        print(infohash)
+        print('', info['name'].decode())
+        for file in info.get('files', []):
+            print('', '', *(p.decode() for p in file['path']))
 
 async def main():
     logging.Formatter.default_msec_format = "%s.%03d"
@@ -416,6 +427,7 @@ async def main():
     add_command("sample_infohashes")
     add_command("bootstrap")
     add_command("check_infos")
+    add_command("list_files")
     single_query_parser = add_command("single_query")
     single_query_parser.add_argument("--addrs", default=global_bootstrap_nodes)
     single_query_parser.add_argument("query")
