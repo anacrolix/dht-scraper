@@ -73,7 +73,7 @@ func mainErr() error {
 				return
 			}
 			defer conn.Close()
-			err = sqlitex.Exec(conn, "insert or ignore into info(infohash, bytes) values (?, ?)", nil, ih, []byte(t.Metainfo().InfoBytes))
+			err = sqlitex.Exec(conn, "insert or ignore into info(infohash, bytes) values (?, ?)", nil, ih.HexString(), []byte(t.Metainfo().InfoBytes))
 			if err != nil {
 				log.Printf("error inserting info into db: %v", err)
 				return
